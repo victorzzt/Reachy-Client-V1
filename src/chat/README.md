@@ -10,14 +10,15 @@ The client connects with WebSocket source `reachyrobot` and switches the initial
 
 ## 配置与启动 / Configure and run
 
-在项目根目录创建 `.env`，从本目录的 `.env.example` 复制模板，然后填写后端账号。依赖安装到 Reachy 的官方应用虚拟环境 `/venvs/apps_venv` 中。
+将目录放在 Reachy 的 `~/apps/chat/` 后，在该目录创建 `.env`，从 `.env.example` 复制模板并填写后端账号。也可以直接从仓库运行；此时客户端会读取 `src/chat/.env`，若不存在则读取项目根目录的 `.env`。依赖安装到 Reachy 的官方应用虚拟环境 `/venvs/apps_venv` 中。
 
-Create `.env` in the project root by copying this directory's `.env.example`, then enter the backend credentials. Install the dependencies into Reachy's official apps virtual environment at `/venvs/apps_venv`.
+Place this directory at `~/apps/chat/` on Reachy and create `.env` there by copying `.env.example`, then enter the backend credentials. You can also run from the repository; the client reads `src/chat/.env` first and falls back to the project-root `.env`. Install dependencies into Reachy's official apps virtual environment at `/venvs/apps_venv`.
 
 ```sh
-cp src/chat/.env.example .env
-/venvs/apps_venv/bin/pip install -r src/chat/requirements.txt
-/venvs/apps_venv/bin/python src/chat/main.py
+cd ~/apps/chat
+cp .env.example .env
+/venvs/apps_venv/bin/pip install -r requirements.txt
+/venvs/apps_venv/bin/python main.py
 ```
 
 按回车发送当前麦克风轮次；输入文字后按回车会发送文本轮次；输入 `/q` 结束对话。不要把含真实账号密码的 `.env` 提交到 Git。

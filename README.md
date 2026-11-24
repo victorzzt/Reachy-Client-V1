@@ -18,9 +18,9 @@ For quick-start steps for the Reachy Mini simulator on Windows and Linux, see th
 
 ## QT 对话客户端初步移植 / Initial QT Conversation Client Port
 
-`src/chat/` 包含从 QT Robot Dementia Speech System Client V3 初步移植的 Reachy Mini 对话客户端。它保留手动轮次对话：麦克风音频持续流向后端，用户按回车发送；也支持输入文字发送。Reachy 通过 SDK 麦克风和扬声器接口采集音频并播放后端语音，不依赖 QT 的 ROS 服务。配置和运行步骤见[对话客户端说明](src/chat/README.md)。
+`src/chat/` 包含从 QT Robot Dementia Speech System Client V3 初步移植的 Reachy Mini 对话客户端。它保留手动轮次对话：麦克风音频持续流向后端，用户按回车发送；也支持输入文字发送。Reachy 通过 SDK 麦克风和扬声器接口采集音频并播放后端语音，不依赖 QT 的 ROS 服务。设备上另有可直接运行的副本 `~/apps/chat/`，配置和启动步骤见[对话客户端说明](src/chat/README.md)。
 
-`src/chat/` contains the initial Reachy Mini port of the QT Robot Dementia Speech System Client V3 conversation client. It keeps manual turn-taking: microphone audio streams to the backend, and the user presses Enter to send; typed messages are also supported. Reachy captures and plays audio through the SDK microphone and speaker APIs, without QT ROS services. See the [conversation client guide](src/chat/README.md) for configuration and startup steps.
+`src/chat/` contains the initial Reachy Mini port of the QT Robot Dementia Speech System Client V3 conversation client. It keeps manual turn-taking: microphone audio streams to the backend, and the user presses Enter to send; typed messages are also supported. Reachy captures and plays audio through the SDK microphone and speaker APIs, without QT ROS services. A standalone copy is also kept at `~/apps/chat/` on the robot. See the [conversation client guide](src/chat/README.md) for configuration and startup steps.
 
 WebSocket 对话协议的权威副本仍是 `docs/CLIENT_PROTOCOL.md`；协议有变化时，需要从 `v2_benchmarking` 的 `adnan_activity_refactor` 分支同步。QT 客户端上游交互参考为 `Reference/QT-Robot-Dementia-Speech-System-Client-V3` 的 `new_ws_connection` 分支。
 
@@ -40,6 +40,7 @@ Keep the code, demo and tests on Reachy Mini under `~/apps/`. The project copy l
 │   │   ├── chat/
 │   │   └── selftest/
 │   └── tests/
+├── chat/                      # Standalone conversation client copy
 ├── reachy-mini-demo/
 ├── selftest/
 └── logs/

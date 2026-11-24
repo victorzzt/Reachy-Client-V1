@@ -21,8 +21,11 @@ from dotenv import load_dotenv
 from reachy_mini import ReachyMini
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-load_dotenv(PROJECT_ROOT / ".env")
+APP_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = APP_DIR.parents[1] if APP_DIR.parent.name == "src" else APP_DIR
+load_dotenv(APP_DIR / ".env")
+if PROJECT_ROOT != APP_DIR:
+    load_dotenv(PROJECT_ROOT / ".env", override=False)
 
 INPUT_SAMPLE_RATE = 16_000
 MIC_CHUNK_SAMPLES = 1_024  # 64 ms at 16 kHz
