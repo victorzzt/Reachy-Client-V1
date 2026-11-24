@@ -1,8 +1,8 @@
 # Reachy Mini 对话客户端 / Reachy Mini Conversation Client
 
-客户端启动后只在 Reachy 本机监听唤醒词 “Reachy”。待机音频只送入本地 openWakeWord 模型，不上传到后端；检测到唤醒词后才建立聊天 WebSocket。唤醒后无需每轮重复唤醒，直接连续说话即可。
+客户端启动后只在 Reachy 本机监听唤醒词 “Reachy”。待机音频只送入本地 openWakeWord 模型，不上传到后端；检测到唤醒词后会启用电机、展开头部，再建立聊天 WebSocket。唤醒后无需每轮重复唤醒，直接连续说话即可。
 
-At startup, the client listens for “Reachy” locally on the robot. Standby audio is processed only by the local openWakeWord model and is not uploaded. The chat WebSocket opens after the wake word is detected. Once awake, speak naturally across turns without repeating the wake word.
+At startup, the client listens for “Reachy” locally on the robot. Standby audio is processed only by the local openWakeWord model and is not uploaded. After detecting the wake word, it enables the motors and extends the head before opening the chat WebSocket. Once awake, speak naturally across turns without repeating the wake word.
 
 对话使用 WebSocket 的 `source=reachyrobot`、`chat_type=activity` 和 automatic response mode：麦克风音频以 16 kHz、单声道、16-bit PCM 的 `audio_data` 持续发送；后端返回的 `audio_chunk` 在同一连接上接收并由 Reachy 扬声器播放。用户转写和助手回复文字也会显示在终端，不需要按回车请求回复。
 
@@ -12,7 +12,15 @@ Conversation uses the WebSocket with `source=reachyrobot`, `chat_type=activity`,
 
 The five-minute silence timer resets when the Reachy microphone array detects speech or the backend sends a `user_utt` transcript. After five minutes without speech, the client sends `end_chat` and returns to local wake-word standby. The Reachy SDK's `get_DoA()` supplies speech activity; if unavailable, the client falls back to a configurable audio-level threshold.
 
+每次收到助手回复，客户端都会随机播放 `cheerful1`、`loving1` 或 `laughing1` 中的一个动作，并在动作后恢复到展开的头部姿势。静默超时退出时会播放收起流程、调用 Reachy 的睡眠姿态，并禁用电机，之后继续本地监听唤醒词。
+
+For each assistant reply, the client randomly plays one of `cheerful1`, `loving1`, or `laughing1`, then restores the extended head pose. On inactivity timeout, it returns Reachy to the SDK sleep pose, disables the motors, and resumes local wake-word listening.
+
 ## 配置与启动 / Configure and run
+
+聊天客户端按职责拆分为多个模块：`main.py` 负责初始化和启动，`config.py` 读取设置，`audio.py` 转换输入和输出音频，`wakeword.py` 在本机检测唤醒词，`backend.py` 处理 JWT、WebSocket 协议和语音播放队列，`interaction.py` 管理待机与对话状态，`motion.py` 管理唤醒、回复动作和休眠姿态。
+
+The chat client is split by responsibility: `main.py` initializes and starts the app; `config.py` loads settings; `audio.py` converts input and output audio; `wakeword.py` detects the wake word locally; `backend.py` handles JWT, the WebSocket protocol, and speech playback queue; `interaction.py` manages standby and conversation state; and `motion.py` controls wake, reply actions, and the sleep pose.
 
 将目录放在 Reachy 的 `~/apps/chat/` 后，在该目录从 `.env.example` 创建 `.env` 并填写后端账号。测试后端地址应为 `https://sandbox2.cognibot.org`；如果现有 `.env` 仍填写 `https://cognibot.org`，需将 `BASE_HTTP_URL` 改为 sandbox2。不要关闭 TLS 证书校验。
 
@@ -23,12 +31,17 @@ cd ~/apps/chat
 cp .env.example .env
 nano .env
 /venvs/apps_venv/bin/pip install -r requirements.txt
+/venvs/apps_venv/bin/pip install --no-deps openwakeword==0.6.0
 /venvs/apps_venv/bin/python main.py
 ```
 
-默认模型会在首次启动时从其公开仓库下载到 `models/`，下载后会校验 SHA-256。若机器人无法访问 GitHub，可先在 `models/` 放入 `reechy-spk150-steps100k-acc98.15-rec97.50.onnx`，或通过 `WAKEWORD_MODEL_PATH` 指定已有模型。可用 `WAKEWORD_THRESHOLD` 调整唤醒阈值；提高阈值会更严格。输入 `/quit` 或按 Ctrl+C 退出。对话模式中仍可键入文字作为调试备用输入。
+openWakeWord 0.6.0 的 PyPI 安装元数据会在 Linux 上要求 `tflite-runtime`，但 Reachy 当前使用的 Python 3.12 ARM64 没有对应 wheel。客户端选用 ONNX 推理，因此 `requirements.txt` 已列出 ONNX 和其余运行依赖；第二条命令用 `--no-deps` 安装 openWakeWord，跳过不需要的 TFLite 依赖。
 
-The default model downloads from its public repository into `models/` on first launch and is checked against a SHA-256 checksum. If the robot cannot reach GitHub, place `reechy-spk150-steps100k-acc98.15-rec97.50.onnx` in `models/` or set `WAKEWORD_MODEL_PATH`. Adjust `WAKEWORD_THRESHOLD` to tune wake sensitivity; higher values are stricter. Enter `/quit` or press Ctrl+C to exit. Typed text remains available as a fallback while a conversation is active.
+The PyPI metadata for openWakeWord 0.6.0 requests `tflite-runtime` on Linux, but no matching wheel is available for Reachy's Python 3.12 ARM64 environment. This client uses ONNX inference, so `requirements.txt` lists ONNX and the other runtime dependencies; the second command installs openWakeWord with `--no-deps` to skip the unused TFLite dependency.
+
+唤醒词模型会下载到 `models/`，openWakeWord 的 ONNX 前处理模型会下载到 `models/openwakeword/`；每个文件下载后都会校验 SHA-256。若机器人无法访问 GitHub，请将这些模型文件放入对应目录。也可通过 `WAKEWORD_MODEL_PATH` 指定已有唤醒词模型。可用 `WAKEWORD_THRESHOLD` 调整唤醒阈值；提高阈值会更严格。输入 `/quit` 或按 Ctrl+C 退出。对话模式中仍可键入文字作为调试备用输入。
+
+The wake-word model downloads into `models/`, and openWakeWord's ONNX feature models download into `models/openwakeword/`; each file is checked against its SHA-256 checksum. If the robot cannot reach GitHub, place the model files in those directories. Set `WAKEWORD_MODEL_PATH` to use another wake-word model. Adjust `WAKEWORD_THRESHOLD` to tune wake sensitivity; higher values are stricter. Enter `/quit` or press Ctrl+C to exit. Typed text remains available as a fallback while a conversation is active.
 
 默认唤醒模型由社区维护，模型标签拼作 `reechy`，读音对应 Reachy。该模型采用 CC BY-NC-SA 4.0 许可，仅供非商业用途；如分发模型或其衍生版本，须保留署名并遵守相同方式共享条款。模型来源：[reachy-wake-word](https://github.com/andyjmorgan/reachy-wake-word)。Reachy 的媒体 API 参考[官方 Python SDK 文档](https://github.com/pollen-robotics/reachy_mini/blob/main/docs/source/SDK/python-sdk.md)。
 

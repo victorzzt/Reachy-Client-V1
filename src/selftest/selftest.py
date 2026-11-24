@@ -49,6 +49,10 @@ READ_ONLY_ENDPOINTS = (
 
 
 def get_json(path: str) -> tuple[int, object]:
+    """从 Reachy daemon 读取一个 JSON API 端点。
+
+    Read one JSON API endpoint from the Reachy daemon.
+    """
     request = Request(
         f"{DAEMON_URL}{path}",
         headers={"Accept": "application/json"},
@@ -62,10 +66,18 @@ def get_json(path: str) -> tuple[int, object]:
 
 
 def announce(message: str) -> None:
+    """立即输出带自检前缀的状态信息。
+
+    Print a self-test status message immediately.
+    """
     print(f"[selftest] {message}", flush=True)
 
 
 def check_endpoint(name: str, path: str, required: bool) -> tuple[dict, object | None]:
+    """检查单个 API 端点，并区分必需项失败与可选项警告。
+
+    Check one API endpoint and distinguish required failures from optional warnings.
+    """
     result = {
         "name": name,
         "path": path,
@@ -91,6 +103,10 @@ def check_endpoint(name: str, path: str, required: bool) -> tuple[dict, object |
 
 
 def inventory_api(specification: object) -> dict:
+    """提取 OpenAPI 文档中的 GET 端点和标签汇总。
+
+    Extract GET endpoints and a tag summary from the OpenAPI document.
+    """
     if not isinstance(specification, dict):
         raise ValueError("OpenAPI document is not a JSON object")
 
@@ -131,6 +147,10 @@ def inventory_api(specification: object) -> dict:
 
 
 def check_camera_frame() -> dict:
+    """连接 Reachy 媒体接口，并在超时前确认收到有效相机帧。
+
+    Connect to Reachy's media API and confirm a valid camera frame arrives before timeout.
+    """
     from reachy_mini import ReachyMini
 
     deadline = time.monotonic() + CAMERA_TIMEOUT_SECONDS
@@ -153,6 +173,10 @@ def check_camera_frame() -> dict:
 
 
 def set_global_motor_mode_disabled() -> str:
+    """请求 daemon 禁用电机，并读取状态确认结果。
+
+    Ask the daemon to disable the motors and verify the reported state.
+    """
     request = Request(
         f"{DAEMON_URL}/api/motors/set_mode/disabled",
         data=b"",
@@ -169,6 +193,10 @@ def set_global_motor_mode_disabled() -> str:
 
 
 def run_motion_and_emotion_demo() -> dict:
+    """安全地活动头部、身体和天线，再播放表情动作与配套音效。
+
+    Gently move the head, body, and antennas, then play expressions with their sounds.
+    """
     from reachy_mini import ReachyMini
     from reachy_mini.motion.recorded_move import RecordedMoves
     from reachy_mini.utils import create_head_pose
@@ -295,6 +323,10 @@ def run_motion_and_emotion_demo() -> dict:
 
 
 def write_report(report: dict) -> None:
+    """以临时文件加原子替换的方式写入 JSON 自检报告。
+
+    Write the JSON self-test report using a temporary file and atomic replacement.
+    """
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = None
     try:
@@ -314,6 +346,10 @@ def write_report(report: dict) -> None:
 
 
 def main() -> int:
+    """执行 API、相机和动作自检，写入报告并返回成功或失败状态码。
+
+    Run API, camera, and motion checks, write the report, and return an exit status.
+    """
     started_at = datetime.now(timezone.utc).isoformat()
     checks = []
     details = {}
