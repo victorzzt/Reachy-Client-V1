@@ -12,6 +12,20 @@ WebSocket 协议有变更时，需从 `v2_benchmarking` 的 `adnan_activity_refa
 
 When the WebSocket protocol changes upstream, sync this repository's `docs/CLIENT_PROTOCOL.md` from the `adnan_activity_refactor` branch of `v2_benchmarking`. [Upstream protocol document](https://github.com/amurphy99/v2_benchmarking/blob/adnan_activity_refactor/backend/chat_app/websocket/consumers/CLIENT_PROTOCOL.md)
 
+Reachy Mini 模拟器的 Windows 和 Linux 快速启动步骤见[模拟器说明](docs/REACHY_MINI_SIMULATOR.md)。
+
+For quick-start steps for the Reachy Mini simulator on Windows and Linux, see the [simulator guide](docs/REACHY_MINI_SIMULATOR.md).
+
+## QT 对话客户端初步移植 / Initial QT Conversation Client Port
+
+`src/chat/` 包含从 QT Robot Dementia Speech System Client V3 初步移植的 Reachy Mini 对话客户端。它保留手动轮次对话：麦克风音频持续流向后端，用户按回车发送；也支持输入文字发送。Reachy 通过 SDK 麦克风和扬声器接口采集音频并播放后端语音，不依赖 QT 的 ROS 服务。配置和运行步骤见[对话客户端说明](src/chat/README.md)。
+
+`src/chat/` contains the initial Reachy Mini port of the QT Robot Dementia Speech System Client V3 conversation client. It keeps manual turn-taking: microphone audio streams to the backend, and the user presses Enter to send; typed messages are also supported. Reachy captures and plays audio through the SDK microphone and speaker APIs, without QT ROS services. See the [conversation client guide](src/chat/README.md) for configuration and startup steps.
+
+WebSocket 对话协议的权威副本仍是 `docs/CLIENT_PROTOCOL.md`；协议有变化时，需要从 `v2_benchmarking` 的 `adnan_activity_refactor` 分支同步。QT 客户端上游交互参考为 `Reference/QT-Robot-Dementia-Speech-System-Client-V3` 的 `new_ws_connection` 分支。
+
+The authoritative copy of the conversation WebSocket protocol remains `docs/CLIENT_PROTOCOL.md`; sync it from the `adnan_activity_refactor` branch of `v2_benchmarking` when the protocol changes. The QT interaction reference is the `new_ws_connection` branch in `Reference/QT-Robot-Dementia-Speech-System-Client-V3`.
+
 ## Reachy Mini 目录安排 / Reachy Mini Directory Layout
 
 Reachy Mini 上的代码、演示程序和测试统一放在 `~/apps/`。本项目副本位于 `~/apps/Reachy-Client-V1/`，上游 `reachy-mini-demo` 工作副本位于 `~/apps/reachy-mini-demo/`，测试脚本位于 `~/apps/Reachy-Client-V1/tests/`，运行日志和测试结果位于 `~/apps/logs/`。机器人 SDK 脚本须通过 `/venvs/apps_venv/bin/python` 运行。
@@ -23,6 +37,8 @@ Keep the code, demo and tests on Reachy Mini under `~/apps/`. The project copy l
 ├── Reachy-Client-V1/
 │   ├── docs/
 │   ├── src/
+│   │   ├── chat/
+│   │   └── selftest/
 │   └── tests/
 ├── reachy-mini-demo/
 ├── selftest/
