@@ -1,0 +1,23 @@
+[Unit]
+Description=Reachy Mini API, camera, motion, and expression self-test
+Requires=reachy-mini-daemon.service
+After=network.target reachy-mini-daemon.service
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+User=pollen
+Group=pollen
+WorkingDirectory=/home/pollen/apps/selftest
+Environment=PYTHONUNBUFFERED=1
+Environment=REACHY_DAEMON_URL=http://127.0.0.1:8000
+Environment=REACHY_SELFTEST_REPORT=/home/pollen/apps/logs/selftest-last.json
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 90); do curl -fsS --max-time 2 http://127.0.0.1:8000/api/daemon/status >/dev/null && exit 0; sleep 1; done; exit 1'
+ExecStart=/venvs/apps_venv/bin/python -u /home/pollen/apps/selftest/selftest.py
+TimeoutStartSec=180
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target
