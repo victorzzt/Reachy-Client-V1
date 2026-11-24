@@ -12,15 +12,19 @@ Conversation uses the WebSocket with `source=reachyrobot`, `chat_type=activity`,
 
 The five-minute silence timer resets when the Reachy microphone array detects speech or the backend sends a `user_utt` transcript. After five minutes without speech, the client sends `end_chat` and returns to local wake-word standby. The Reachy SDK's `get_DoA()` supplies speech activity; if unavailable, the client falls back to a configurable audio-level threshold.
 
+对话期间也可以说“Reachy，休息一下”“Reachy，暂停一会儿”或 “Reachy, take a break / go to sleep”。同一条指令需要包含 “Reachy” 称呼；语音转写偶尔会把它写成同音的 “Richie” 或 “Ritchie”，客户端也会识别。单独提到休息不会触发。客户端在本地对收到的用户转写运行轻量的同义词与近似拼写匹配；识别到休息意图后立即停止处理后端回复、结束会话、收起 Reachy 并回到本地唤醒待机。该判断不依赖后端语义分析，也不需要额外安装模型。
+
+During a conversation, say “Reachy, take a break / go to sleep” or “Reachy，休息一下 / 暂停一会儿”. Include “Reachy” in the same command; speech recognition may transcribe it as the homophone “Richie” or “Ritchie”, which the client also accepts. Rest-related words alone do not trigger it. The client locally checks the received user transcript using lightweight synonym and fuzzy-spelling rules; when it detects a rest intent, it stops handling backend replies, ends the session, tucks Reachy, and returns to local wake-word standby. This decision does not rely on backend semantic analysis or require an additional model.
+
 每次收到助手回复，客户端都会随机播放 `cheerful1`、`loving1` 或 `laughing1` 中的一个动作，并在动作后恢复到展开的头部姿势。静默超时退出时会播放收起流程、调用 Reachy 的睡眠姿态，并禁用电机，之后继续本地监听唤醒词。
 
 For each assistant reply, the client randomly plays one of `cheerful1`, `loving1`, or `laughing1`, then restores the extended head pose. On inactivity timeout, it returns Reachy to the SDK sleep pose, disables the motors, and resumes local wake-word listening.
 
 ## 配置与启动 / Configure and run
 
-聊天客户端按职责拆分为多个模块：`main.py` 负责初始化和启动，`config.py` 读取设置，`audio.py` 转换输入和输出音频，`wakeword.py` 在本机检测唤醒词，`backend.py` 处理 JWT、WebSocket 协议和语音播放队列，`interaction.py` 管理待机与对话状态，`motion.py` 管理唤醒、回复动作和休眠姿态。
+聊天客户端按职责拆分为多个模块：`main.py` 负责初始化和启动，`config.py` 读取设置，`audio.py` 转换输入和输出音频，`wakeword.py` 在本机检测唤醒词，`intent.py` 在本机识别休息指令，`backend.py` 处理 JWT、WebSocket 协议和语音播放队列，`interaction.py` 管理待机与对话状态，`motion.py` 管理唤醒、回复动作和休眠姿态。
 
-The chat client is split by responsibility: `main.py` initializes and starts the app; `config.py` loads settings; `audio.py` converts input and output audio; `wakeword.py` detects the wake word locally; `backend.py` handles JWT, the WebSocket protocol, and speech playback queue; `interaction.py` manages standby and conversation state; and `motion.py` controls wake, reply actions, and the sleep pose.
+The chat client is split by responsibility: `main.py` initializes and starts the app; `config.py` loads settings; `audio.py` converts input and output audio; `wakeword.py` detects the wake word locally; `intent.py` detects rest commands locally; `backend.py` handles JWT, the WebSocket protocol, and speech playback queue; `interaction.py` manages standby and conversation state; and `motion.py` controls wake, reply actions, and the sleep pose.
 
 将目录放在 Reachy 的 `~/apps/chat/` 后，在该目录从 `.env.example` 创建 `.env` 并填写后端账号。测试后端地址应为 `https://sandbox2.cognibot.org`；如果现有 `.env` 仍填写 `https://cognibot.org`，需将 `BASE_HTTP_URL` 改为 sandbox2。不要关闭 TLS 证书校验。
 

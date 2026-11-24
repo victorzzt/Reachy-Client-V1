@@ -19,6 +19,7 @@ from config import (
     MIC_CHUNK_SAMPLES,
     SPEECH_RMS_THRESHOLD,
 )
+from intent import LocalIntentDetector
 from motion import ReachyMotionController
 from wakeword import WakeWordDetector
 
@@ -41,6 +42,8 @@ class VoiceInteractionApp:
         self.session: BackendConversation | None = None
         self.connect_task: asyncio.Task | None = None
         self.motion = ReachyMotionController(mini)
+        self.intent_detector = LocalIntentDetector()
+        self.sleep_requested = asyncio.Event()
         self.preroll: deque[bytes] = deque(maxlen=CONNECT_BUFFER_CHUNKS)
         self.last_user_speech_at = 0.0
         self.stop_requested = False
@@ -145,6 +148,7 @@ class VoiceInteractionApp:
             self.mini,
             self._mark_user_speech,
             self.motion.schedule_reply_action,
+            self._handle_sleep_command,
         )
         try:
             await session.start()
@@ -162,6 +166,7 @@ class VoiceInteractionApp:
         self.connect_task = None
         self.preroll.clear()
         self.last_user_speech_at = 0.0
+        self.sleep_requested.clear()
         self.wakeword.reset()
         self.state = "standby"
         print("\nStandby: say 'Reachy' to start another conversation.")
@@ -206,6 +211,11 @@ class VoiceInteractionApp:
         """
         if self.state != "active" or self.session is None:
             return
+        if self.sleep_requested.is_set():
+            self.sleep_requested.clear()
+            print("\nLocal sleep command detected; ending the conversation and resting.")
+            await self._leave_session("local sleep command", send_end_chat=True)
+            return
         if self.session.done.is_set():
             reason = "backend ended the session"
             if self.session.reader_error is not None:
@@ -243,6 +253,17 @@ class VoiceInteractionApp:
         """
         self.last_user_speech_at = time.monotonic()
 
+    def _handle_sleep_command(self, transcript: str) -> bool:
+        """在本机分类转写；命中休息指令时请求立即结束会话。
+
+        Classify the transcript locally and request an immediate session end on a rest command.
+        """
+        if self.intent_detector.is_sleep_command(transcript):
+            self.sleep_requested.set()
+            print("\n[local intent] Reachy sleep or pause command recognized.")
+            return True
+        return False
+
     def _speech_detected(self, sample: np.ndarray) -> bool:
         """优先使用麦克风阵列 VAD；不可用时回退到 RMS 音量检测。
 
@@ -275,6 +296,8 @@ class VoiceInteractionApp:
             if not entry:
                 continue
             if self.state == "active" and self.session is not None:
+                if self._handle_sleep_command(entry):
+                    return
                 try:
                     await self.session.send_text(entry)
                     self._mark_user_speech()

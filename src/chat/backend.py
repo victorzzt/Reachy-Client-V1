@@ -7,6 +7,7 @@ import base64
 import json
 import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from urllib.parse import urlencode, urlsplit
 from uuid import uuid4
@@ -220,7 +221,13 @@ class BackendConversation:
     Manage one automatic voice conversation and its assistant audio queue.
     """
 
-    def __init__(self, mini: ReachyMini, on_user_speech, on_assistant_response) -> None:
+    def __init__(
+        self,
+        mini: ReachyMini,
+        on_user_speech,
+        on_assistant_response,
+        on_user_text: Callable[[str], bool] | None = None,
+    ) -> None:
         """保存机器人与活动回调，并初始化会话任务和音频队列。
 
         Store the robot and activity callbacks, then initialize session tasks and audio queues.
@@ -229,6 +236,7 @@ class BackendConversation:
         self.backend = BackendClient()
         self.on_user_speech = on_user_speech
         self.on_assistant_response = on_assistant_response
+        self.on_user_text = on_user_text or (lambda text: False)
         self.output_rate = mini.media.get_output_audio_samplerate()
         self.audio_allowed = asyncio.Event()
         self.done = asyncio.Event()
@@ -334,14 +342,17 @@ class BackendConversation:
             print(f"\n[robot action] {action.get('kind')}: {action.get('value')}")
 
     def _show_user_text(self, text: str) -> None:
-        """显示新的用户转写，并重置静默计时。
+        """显示用户转写并分类；命中本地指令后立即停止接收后端回复。
 
-        Display a new user transcript and reset the silence timer.
+        Display the transcript, reset inactivity, and stop reading backend replies on a local command.
         """
         text = text.strip()
         if not text:
             return
         self.on_user_speech()
+        if self.on_user_text(text):
+            self.audio_allowed.clear()
+            self.done.set()
         if text not in self.user_messages_seen:
             self.user_messages_seen.add(text)
             print(f"\nYou: {text}")
