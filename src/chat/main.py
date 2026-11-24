@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reachy Mini voice chat client for the Dementia Speech System backend."""
+"""Wake-word gated, hands-free Reachy Mini conversation client."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import os
 import queue
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
@@ -17,8 +18,11 @@ from uuid import uuid4
 
 import aiohttp
 import numpy as np
+from aiohttp.client_exceptions import ClientConnectorCertificateError
 from dotenv import load_dotenv
 from reachy_mini import ReachyMini
+
+from wakeword import WakeWordDetector
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -28,7 +32,12 @@ if PROJECT_ROOT != APP_DIR:
     load_dotenv(PROJECT_ROOT / ".env", override=False)
 
 INPUT_SAMPLE_RATE = 16_000
-MIC_CHUNK_SAMPLES = 1_024  # 64 ms at 16 kHz
+MIC_CHUNK_SAMPLES = 1_024  # 64 ms at 16 kHz, as in the Reachy protocol guide
+CONVERSATION_TIMEOUT_SECONDS = float(
+    os.getenv("CONVERSATION_TIMEOUT_SECONDS", "300")
+)
+SPEECH_RMS_THRESHOLD = float(os.getenv("SPEECH_RMS_THRESHOLD", "0.015"))
+CONNECT_BUFFER_CHUNKS = 100  # bounded ~6.4 s pre-roll while opening the backend session
 
 
 @dataclass
@@ -39,16 +48,19 @@ class AudioFrame:
 
 
 class BackendClient:
-    """JWT login and primary-chat WebSocket transport."""
+    """JWT login and the primary chat WebSocket transport."""
 
     def __init__(self) -> None:
-        self.base_url = os.getenv("BASE_HTTP_URL", "https://cognibot.org").rstrip("/")
+        self.base_url = os.getenv(
+            "BASE_HTTP_URL", "https://sandbox2.cognibot.org"
+        ).rstrip("/")
         self.ws_path = os.getenv("WS_PATH", "/ws/chat/")
         if not self.ws_path.startswith("/"):
             self.ws_path = "/" + self.ws_path
         self.source = os.getenv("SOURCE", "reachyrobot").strip().lower()
         if self.source != "reachyrobot":
-            raise RuntimeError("This Reachy Mini client requires SOURCE=reachyrobot")
+            raise RuntimeError("This client requires SOURCE=reachyrobot")
+        self.chat_type = os.getenv("CHAT_TYPE", "activity").strip()
         self.username = os.getenv("USERNAME")
         self.password = os.getenv("PASSWORD")
         self.session: aiohttp.ClientSession | None = None
@@ -58,7 +70,7 @@ class BackendClient:
 
     async def connect(self) -> None:
         if not self.username or not self.password:
-            raise RuntimeError("Set USERNAME and PASSWORD in the project-root .env file")
+            raise RuntimeError("Set USERNAME and PASSWORD in the chat .env file")
 
         self.session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=30),
@@ -79,7 +91,13 @@ class BackendClient:
 
         base = urlsplit(self.base_url)
         scheme = "wss" if base.scheme == "https" else "ws"
-        query = urlencode({"token": access_token, "source": self.source})
+        query = urlencode(
+            {
+                "token": access_token,
+                "source": self.source,
+                "chat_type": self.chat_type,
+            }
+        )
         websocket_url = f"{scheme}://{base.netloc}{self.ws_path}?{query}"
         self.ws = await self.session.ws_connect(
             websocket_url,
@@ -219,125 +237,106 @@ def speaker_samples(payload: dict, output_rate: int) -> np.ndarray | None:
     return samples.astype(np.float32, copy=False)
 
 
-class VoiceChat:
-    def __init__(self, mini: ReachyMini) -> None:
+class BackendConversation:
+    """One automatic Reachy conversation: microphone PCM in, backend TTS out."""
+
+    def __init__(self, mini: ReachyMini, on_user_speech) -> None:
         self.mini = mini
         self.backend = BackendClient()
+        self.on_user_speech = on_user_speech
         self.output_rate = mini.media.get_output_audio_samplerate()
-        self.input_rate = mini.media.get_input_audio_samplerate()
-        self.capture_enabled = asyncio.Event()
-        self.stop_event = asyncio.Event()
+        self.audio_allowed = asyncio.Event()
+        self.done = asyncio.Event()
         self.audio_queue: asyncio.Queue[AudioFrame | None] = asyncio.Queue()
         self.user_messages_seen: set[str] = set()
-        self.audio_started: set[int] = set()
         self.cancelled_responses: set[int] = set()
-        self.speech_active = False
-        self._reader_error: Exception | None = None
-        self._reader_task: asyncio.Task | None = None
+        self.started_responses: set[int] = set()
+        self.current_response_id: int | None = None
+        self.reader_task: asyncio.Task | None = None
+        self.player_task: asyncio.Task | None = None
+        self.reader_error: Exception | None = None
 
     async def start(self) -> None:
         await self.backend.connect()
-        self._reader_task = asyncio.create_task(self.listen_backend())
-        print("Connected to the conversation service.")
-        await self.backend.send_command("set_response_mode", {"mode": "manual"})
+        self.reader_task = asyncio.create_task(self._listen_backend())
+        self.player_task = asyncio.create_task(self._play_audio())
+        await self.backend.send_command("set_response_mode", {"mode": "automatic"})
         await self.backend.send_command("set_listening", {"state": "active"})
-        self.capture_enabled.set()
-        print("Speak, then press Enter to send. Type a message to send text; /q ends chat.")
+        self.audio_allowed.set()
+        print("Conversation connected; speak naturally without pressing Enter.")
 
-    async def capture_microphone(self) -> None:
-        while not self.stop_event.is_set():
-            sample = await asyncio.to_thread(self.mini.media.get_audio_sample)
-            if sample is None:
-                await asyncio.sleep(0.01)
-                continue
-            if not self.capture_enabled.is_set():
-                continue
+    async def send_audio(self, pcm: bytes) -> None:
+        if self.audio_allowed.is_set() and not self.done.is_set():
+            await self.backend.send_audio(pcm)
 
-            pcm = microphone_pcm(sample, self.input_rate)
-            if not pcm:
-                continue
-            bytes_per_chunk = MIC_CHUNK_SAMPLES * 2
-            for offset in range(0, len(pcm), bytes_per_chunk):
-                if not self.capture_enabled.is_set() or self.stop_event.is_set():
-                    break
-                await self.backend.send_audio(pcm[offset : offset + bytes_per_chunk])
+    async def send_text(self, text: str) -> None:
+        await self.backend.send_transcription(text)
 
-    async def listen_backend(self) -> None:
+    async def _listen_backend(self) -> None:
         try:
             async for payload in self.backend.messages():
-                await self.handle_message(payload)
-                if self.stop_event.is_set():
+                await self._handle_message(payload)
+                if self.done.is_set():
                     return
         except Exception as exc:
-            self._reader_error = exc
-            print(f"\n[backend] Connection ended: {exc}")
+            self.reader_error = exc
+            print(f"\n[backend] Conversation disconnected: {exc}")
         finally:
-            self.stop_event.set()
+            self.done.set()
             await self.audio_queue.put(None)
 
-    async def handle_message(self, payload: dict) -> None:
+    async def _handle_message(self, payload: dict) -> None:
         message_type = payload.get("type")
         data = payload.get("data")
 
         if message_type == "command_ack" and isinstance(data, dict):
             self.backend.resolve_command_ack(data)
+        elif message_type == "user_utt" and isinstance(data, str):
+            self._show_user_text(data)
         elif message_type == "message" and isinstance(data, dict):
             if data.get("role") == "user":
-                text = str(data.get("content", "")).strip()
-                if text and text not in self.user_messages_seen:
-                    self.user_messages_seen.add(text)
-                    print(f"\nYou: {text}")
-        elif message_type == "user_utt" and isinstance(data, str):
-            text = data.strip()
-            if text and text not in self.user_messages_seen:
-                self.user_messages_seen.add(text)
-                print(f"\nYou: {text}")
+                self._show_user_text(str(data.get("content", "")))
         elif message_type == "llm_response":
             text = data.get("text", "") if isinstance(data, dict) else data
             if text:
                 print(f"\nReachy: {text}")
-            self.speech_active = True
-            self.capture_enabled.clear()
-            await self.backend.send_command(
-                "set_listening", {"state": "paused"}, wait_for_ack=False
-            )
-            response_id = payload.get("responseId")
-            if isinstance(response_id, int):
-                asyncio.create_task(self.resume_if_audio_missing(response_id))
         elif message_type == "audio_chunk" and isinstance(data, dict):
             response_id = data.get("responseId")
-            if not isinstance(response_id, int) or response_id in self.cancelled_responses:
+            if type(response_id) is not int or response_id in self.cancelled_responses:
                 return
             samples = speaker_samples(data, self.output_rate)
-            if samples is None:
-                return
-            self.speech_active = True
-            self.capture_enabled.clear()
-            await self.audio_queue.put(
-                AudioFrame(response_id=response_id, samples=samples, last=data.get("last") is True)
-            )
+            if samples is not None:
+                await self.audio_queue.put(
+                    AudioFrame(
+                        response_id=response_id,
+                        samples=samples,
+                        last=data.get("last") is True,
+                    )
+                )
         elif message_type == "cancel_audio":
-            await self.cancel_audio(data if isinstance(data, dict) else {})
+            await self._cancel_audio(data if isinstance(data, dict) else {})
         elif message_type == "stream_status" and isinstance(data, dict):
             if data.get("status") == "paused":
-                self.capture_enabled.clear()
-            elif data.get("status") == "active" and not self.speech_active:
-                self.capture_enabled.set()
+                self.audio_allowed.clear()
+            elif data.get("status") == "active":
+                self.audio_allowed.set()
         elif message_type == "chat_ended":
-            print("\nThe conversation has ended.")
-            self.stop_event.set()
+            print("\nThe backend ended this conversation.")
+            self.done.set()
         elif message_type == "robot_action":
             action = data if isinstance(data, dict) else {}
             print(f"\n[robot action] {action.get('kind')}: {action.get('value')}")
 
-    async def resume_if_audio_missing(self, response_id: int) -> None:
-        await asyncio.sleep(20)
-        if response_id not in self.audio_started and self.speech_active:
-            print("\n[ audio ] No speech audio arrived; resuming the microphone.")
-            await self.resume_listening()
+    def _show_user_text(self, text: str) -> None:
+        text = text.strip()
+        if not text:
+            return
+        self.on_user_speech()
+        if text not in self.user_messages_seen:
+            self.user_messages_seen.add(text)
+            print(f"\nYou: {text}")
 
-    async def playback_audio(self) -> None:
-        started_responses: set[int] = set()
+    async def _play_audio(self) -> None:
         try:
             while True:
                 frame = await self.audio_queue.get()
@@ -347,40 +346,53 @@ class VoiceChat:
                     if frame.response_id in self.cancelled_responses:
                         continue
 
-                    if frame.response_id not in started_responses:
-                        started_responses.add(frame.response_id)
-                        self.audio_started.add(frame.response_id)
+                    if frame.response_id not in self.started_responses:
+                        self.started_responses.add(frame.response_id)
                         await self.backend.send_json(
                             {
                                 "type": "tts_playback",
-                                "data": {"responseId": frame.response_id, "state": "started"},
+                                "data": {
+                                    "responseId": frame.response_id,
+                                    "state": "started",
+                                },
                             }
                         )
 
+                    self.current_response_id = frame.response_id
                     self.mini.media.push_audio_sample(frame.samples)
                     if self.output_rate > 0:
                         await asyncio.sleep(frame.samples.size / self.output_rate)
+                    if frame.response_id in self.cancelled_responses:
+                        continue
 
                     if frame.last:
                         await self.backend.send_json(
                             {
                                 "type": "tts_playback",
-                                "data": {"responseId": frame.response_id, "state": "finished"},
+                                "data": {
+                                    "responseId": frame.response_id,
+                                    "state": "finished",
+                                },
                             }
                         )
-                        self.speech_active = False
-                        await self.resume_listening()
+                        self.current_response_id = None
                 finally:
                     self.audio_queue.task_done()
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             print(f"\n[audio] Playback failed: {exc}")
-            self.stop_event.set()
+            self.reader_error = exc
+            self.done.set()
 
-    async def cancel_audio(self, data: dict) -> None:
+    async def _cancel_audio(self, data: dict) -> None:
         response_ids = data.get("responseIds")
-        if not isinstance(response_ids, list):
-            response_ids = list(self.audio_started)
-        cancelled = {item for item in response_ids if isinstance(item, int)}
+        if isinstance(response_ids, list):
+            cancelled = {value for value in response_ids if isinstance(value, int)}
+        else:
+            cancelled = set(self.started_responses)
+            if self.current_response_id is not None:
+                cancelled.add(self.current_response_id)
         self.cancelled_responses.update(cancelled)
 
         retained: list[AudioFrame | None] = []
@@ -398,102 +410,255 @@ class VoiceChat:
         if cancelled:
             self.mini.media.stop_playing()
             self.mini.media.start_playing()
-            for response_id in cancelled & self.audio_started:
+            for response_id in cancelled & self.started_responses:
                 await self.backend.send_json(
                     {
                         "type": "tts_playback",
-                        "data": {"responseId": response_id, "state": "interrupted"},
+                        "data": {
+                            "responseId": response_id,
+                            "state": "interrupted",
+                        },
                     }
                 )
-            self.speech_active = False
-            await self.resume_listening()
+            if self.current_response_id in cancelled:
+                self.current_response_id = None
 
-    async def resume_listening(self) -> None:
-        await self.backend.send_command(
-            "set_listening", {"state": "active"}, wait_for_ack=False
-        )
-        self.capture_enabled.set()
-
-    async def run_console(self) -> None:
-        commands: queue.Queue[str] = queue.Queue()
-        threading.Thread(target=read_console, args=(commands,), daemon=True).start()
-
-        while not self.stop_event.is_set():
+    async def close(self, *, send_end_chat: bool) -> None:
+        self.audio_allowed.clear()
+        if send_end_chat and self.backend.ws is not None and not self.backend.ws.closed:
             try:
-                entry = commands.get_nowait().strip()
-            except queue.Empty:
-                await asyncio.sleep(0.1)
-                continue
+                await self.backend.send_end_chat()
+            except Exception:
+                pass
+            self.mini.media.stop_playing()
+            self.mini.media.start_playing()
 
-            if entry.lower() in {"/q", "/quit", "/exit"}:
-                self.capture_enabled.clear()
-                try:
-                    await self.backend.send_command(
-                        "set_listening", {"state": "paused"}, wait_for_ack=False
-                    )
-                    await self.backend.send_end_chat()
-                except (ConnectionError, RuntimeError):
-                    pass
-                self.stop_event.set()
-                break
+        self.done.set()
+        await self.audio_queue.put(None)
+        tasks = [task for task in (self.reader_task, self.player_task) if task]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        await self.backend.close()
 
-            if entry:
-                self.capture_enabled.clear()
-                await self.backend.send_command(
-                    "set_listening", {"state": "paused"}, wait_for_ack=False
-                )
-                await self.backend.send_transcription(entry)
 
-            try:
-                await self.backend.send_command("reply_now")
-            except Exception as exc:
-                print(f"\n[backend] Could not request a reply: {exc}")
-                self.capture_enabled.set()
+class VoiceInteractionApp:
+    """Local wake standby plus an automatic, hands-free WebSocket session."""
+
+    def __init__(self, mini: ReachyMini, wakeword: WakeWordDetector) -> None:
+        self.mini = mini
+        self.wakeword = wakeword
+        self.input_rate = mini.media.get_input_audio_samplerate()
+        self.state = "standby"
+        self.session: BackendConversation | None = None
+        self.connect_task: asyncio.Task | None = None
+        self.preroll: deque[bytes] = deque(maxlen=CONNECT_BUFFER_CHUNKS)
+        self.last_user_speech_at = 0.0
+        self.stop_requested = False
+        self.command_queue: queue.Queue[str] = queue.Queue()
+        self._doa_unavailable = False
+        if CONVERSATION_TIMEOUT_SECONDS <= 0:
+            raise ValueError("CONVERSATION_TIMEOUT_SECONDS must be greater than 0")
 
     async def run(self) -> None:
-        tasks: list[asyncio.Task] = []
+        threading.Thread(
+            target=read_console,
+            args=(self.command_queue,),
+            daemon=True,
+        ).start()
+        print(
+            "Standby: say 'Reachy' to start. Speak naturally for follow-up turns; "
+            "five minutes without speech returns to standby. Ctrl+C or /quit exits."
+        )
+
         try:
-            await self.start()
-            tasks = [
-                asyncio.create_task(self.capture_microphone()),
-                self._reader_task,
-                asyncio.create_task(self.playback_audio()),
-            ]
-            await self.run_console()
-            if self._reader_error is None:
+            while not self.stop_requested:
+                await self._handle_console_input()
+                await self._finish_connection_if_ready()
+                await self._check_session_state()
+
+                sample = await asyncio.to_thread(self.mini.media.get_audio_sample)
+                if sample is None:
+                    await asyncio.sleep(0.01)
+                    continue
+
+                pcm = microphone_pcm(sample, self.input_rate)
+                if not pcm:
+                    continue
+
+                if self.state == "active" and self._speech_detected(sample):
+                    self._mark_user_speech()
+
+                await self._process_audio(pcm)
+        finally:
+            if self.connect_task is not None and not self.connect_task.done():
+                self.connect_task.cancel()
+                await asyncio.gather(self.connect_task, return_exceptions=True)
+            if self.session is not None:
+                await self._leave_session("process stopped", send_end_chat=True)
+
+    async def _process_audio(self, pcm: bytes) -> None:
+        chunk_bytes = MIC_CHUNK_SAMPLES * 2
+        for offset in range(0, len(pcm), chunk_bytes):
+            frame = pcm[offset : offset + chunk_bytes]
+            if self.state == "standby":
+                detected, trailing_audio = self.wakeword.feed(frame)
+                if detected:
+                    print("\nWake word detected. Starting conversation...")
+                    self.state = "connecting"
+                    self.last_user_speech_at = time.monotonic()
+                    self.preroll.clear()
+                    if trailing_audio:
+                        self._buffer_preroll(trailing_audio)
+                    remainder = pcm[offset + len(frame) :]
+                    if remainder:
+                        self._buffer_preroll(remainder)
+                    self.connect_task = asyncio.create_task(self._connect_session())
+                    return
+            elif self.state == "connecting":
+                self._buffer_preroll(frame)
+            elif self.state == "active" and self.session is not None:
                 try:
-                    await asyncio.wait_for(self.audio_queue.join(), timeout=3)
+                    await self.session.send_audio(frame)
+                except Exception as exc:
+                    print(f"\n[backend] Could not send microphone audio: {exc}")
+                    self.session.done.set()
+                    return
+
+    def _buffer_preroll(self, pcm: bytes) -> None:
+        chunk_bytes = MIC_CHUNK_SAMPLES * 2
+        for offset in range(0, len(pcm), chunk_bytes):
+            if len(self.preroll) == self.preroll.maxlen:
+                print("\n[backend] Connection slow; dropping oldest wake pre-roll audio")
+            self.preroll.append(pcm[offset : offset + chunk_bytes])
+
+    async def _connect_session(self) -> BackendConversation:
+        session = BackendConversation(self.mini, self._mark_user_speech)
+        try:
+            await session.start()
+            return session
+        except Exception:
+            await session.close(send_end_chat=False)
+            raise
+
+    async def _finish_connection_if_ready(self) -> None:
+        if self.state != "connecting" or self.connect_task is None:
+            return
+        if not self.connect_task.done():
+            return
+
+        task = self.connect_task
+        self.connect_task = None
+        try:
+            self.session = task.result()
+        except Exception as exc:
+            print(f"\n[backend] Could not start conversation: {exc}")
+            self._return_to_standby()
+            return
+
+        try:
+            while self.preroll:
+                await self.session.send_audio(self.preroll.popleft())
+        except Exception as exc:
+            print(f"\n[backend] Could not send buffered microphone audio: {exc}")
+            await self._leave_session("audio stream failed", send_end_chat=True)
+            return
+
+        self.last_user_speech_at = time.monotonic()
+        self.state = "active"
+
+    async def _check_session_state(self) -> None:
+        if self.state != "active" or self.session is None:
+            return
+        if self.session.done.is_set():
+            reason = "backend ended the session"
+            if self.session.reader_error is not None:
+                reason = f"backend disconnected: {self.session.reader_error}"
+            print(f"\n{reason}; returning to wake-word standby.")
+            await self._leave_session(reason, send_end_chat=False)
+            return
+
+        idle_seconds = time.monotonic() - self.last_user_speech_at
+        if idle_seconds >= CONVERSATION_TIMEOUT_SECONDS:
+            print("\nFive minutes without speech; ending the chat and returning to standby.")
+            await self._leave_session("inactivity timeout", send_end_chat=True)
+
+    async def _leave_session(self, reason: str, *, send_end_chat: bool) -> None:
+        session = self.session
+        self.session = None
+        if session is not None:
+            if not send_end_chat:
+                try:
+                    await asyncio.wait_for(session.audio_queue.join(), timeout=20)
                 except asyncio.TimeoutError:
                     pass
-        finally:
-            self.stop_event.set()
-            for task in tasks:
-                if task is not None:
-                    task.cancel()
-            if self._reader_task is not None and self._reader_task not in tasks:
-                self._reader_task.cancel()
-                tasks.append(self._reader_task)
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
-            await self.backend.close()
+            await session.close(send_end_chat=send_end_chat)
+        self._return_to_standby()
+
+    def _return_to_standby(self) -> None:
+        self.session = None
+        self.connect_task = None
+        self.preroll.clear()
+        self.last_user_speech_at = 0.0
+        self.wakeword.reset()
+        self.state = "standby"
+        print("\nStandby: say 'Reachy' to start another conversation.")
+
+    def _mark_user_speech(self) -> None:
+        self.last_user_speech_at = time.monotonic()
+
+    def _speech_detected(self, sample: np.ndarray) -> bool:
+        """Use the Reachy mic-array VAD, with a small RMS fallback."""
+        try:
+            _, detected = self.mini.media.get_DoA()
+            return bool(detected)
+        except Exception as exc:
+            if not self._doa_unavailable:
+                print(f"\n[voice activity] Reachy VAD unavailable; using RMS fallback: {exc}")
+                self._doa_unavailable = True
+            values = np.asarray(sample, dtype=np.float32)
+            return bool(values.size and float(np.sqrt(np.mean(values * values))) >= SPEECH_RMS_THRESHOLD)
+
+    async def _handle_console_input(self) -> None:
+        while True:
+            try:
+                entry = self.command_queue.get_nowait().strip()
+            except queue.Empty:
+                return
+
+            if entry.lower() in {"/q", "/quit", "/exit"}:
+                self.stop_requested = True
+                return
+            if not entry:
+                continue
+            if self.state == "active" and self.session is not None:
+                try:
+                    await self.session.send_text(entry)
+                    self._mark_user_speech()
+                except Exception as exc:
+                    print(f"\n[backend] Could not send typed text: {exc}")
+            else:
+                print("\nText input is available after saying 'Reachy'.")
 
 
 def read_console(commands: queue.Queue[str]) -> None:
     while True:
         try:
-            commands.put(input("\nEnter = send speech | text = send text | /q = end chat\n> "))
+            commands.put(input("\nType a fallback message while active, or /quit to exit\n> "))
         except EOFError:
-            commands.put("/q")
+            commands.put("/quit")
             return
 
 
 async def async_main() -> None:
+    wakeword = WakeWordDetector()
     print("Connecting to Reachy Mini audio...")
     with ReachyMini(media_backend="default") as mini:
         mini.media.start_recording()
         mini.media.start_playing()
         try:
-            await VoiceChat(mini).run()
+            await VoiceInteractionApp(mini, wakeword).run()
         finally:
             mini.media.stop_recording()
             mini.media.stop_playing()
@@ -502,6 +667,14 @@ async def async_main() -> None:
 def main() -> None:
     try:
         asyncio.run(async_main())
+    except ClientConnectorCertificateError as exc:
+        print(
+            "TLS certificate hostname mismatch. Set BASE_HTTP_URL in .env to the "
+            "backend hostname covered by its certificate. For the current test "
+            "backend, use https://sandbox2.cognibot.org. Certificate checks remain enabled."
+        )
+        print(f"Details: {exc}")
+        raise SystemExit(1) from None
     except KeyboardInterrupt:
         print("\nChat stopped.")
 
