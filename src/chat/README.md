@@ -39,6 +39,29 @@ nano .env
 /venvs/apps_venv/bin/python main.py
 ```
 
+在 Host 上运行时，先启用 Host 自己的 Conda 环境并安装客户端依赖；`/venvs/apps_venv` 只存在于 Reachy OS，不适用于 Host。若同一环境尚未安装 Reachy Mini SDK，请先按模拟器指南安装 `reachy-mini[mujoco]`。
+
+When running on a host, activate the host's Conda environment and install the client dependencies there. `/venvs/apps_venv` exists only on Reachy OS and is not used on the host. If the Reachy Mini SDK is not already installed in that environment, install `reachy-mini[mujoco]` using the simulator guide first.
+
+```sh
+cd /path/to/Reachy-Client-V1/src/chat
+conda activate reachy_mini_env
+python -m pip install -r requirements.txt
+python -m pip install --no-deps openwakeword==0.6.0
+```
+
+运行模拟器时，可在另一台电脑先建立并保持 SSH 隧道，再运行客户端。客户端会检测是否位于 Reachy OS；不在 Reachy OS 时自动经 `127.0.0.1:8000` 隧道连接控制 API，并在 Host 上使用本地麦克风和扬声器，避免依赖未转发的 WebRTC 信令端口 `8443`。项目要求 Python 3.12；版本不符时会提示检查是否忘记启用 Conda 环境。
+
+For simulator use, open and keep an SSH tunnel from the client computer before starting the chat client. Outside Reachy OS, the client connects its control API through `127.0.0.1:8000` and uses the Host's local microphone and speakers, so it does not depend on the unforwarded WebRTC signaling port `8443`. Python 3.12 is required; if the version is wrong, the startup message reminds you to check whether the Conda environment is active.
+
+```sh
+ssh -N -L 8000:127.0.0.1:8000 <linux_user>@<simulator_ip>
+```
+
+在另一终端中启用 `reachy_mini_env` 后，从 `src/chat/` 运行 `python main.py`。同一 Conda 环境需要已经安装 Reachy Mini SDK、`requirements.txt` 中的依赖和 `openwakeword==0.6.0`。
+
+In another terminal, activate `reachy_mini_env` and run `python main.py` from `src/chat/`. The same Conda environment must contain the Reachy Mini SDK, the packages in `requirements.txt`, and `openwakeword==0.6.0`.
+
 openWakeWord 0.6.0 的 PyPI 安装元数据会在 Linux 上要求 `tflite-runtime`，但 Reachy 当前使用的 Python 3.12 ARM64 没有对应 wheel。客户端选用 ONNX 推理，因此 `requirements.txt` 已列出 ONNX 和其余运行依赖；第二条命令用 `--no-deps` 安装 openWakeWord，跳过不需要的 TFLite 依赖。
 
 The PyPI metadata for openWakeWord 0.6.0 requests `tflite-runtime` on Linux, but no matching wheel is available for Reachy's Python 3.12 ARM64 environment. This client uses ONNX inference, so `requirements.txt` lists ONNX and the other runtime dependencies; the second command installs openWakeWord with `--no-deps` to skip the unused TFLite dependency.

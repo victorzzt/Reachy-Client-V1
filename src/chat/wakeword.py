@@ -117,9 +117,23 @@ class WakeWordDetector:
         try:
             from openwakeword.model import Model
         except ImportError as exc:
+            if (
+                Path("/venvs/apps_venv").is_dir()
+                and Path("/venvs/mini_daemon").is_dir()
+            ):
+                install_hint = (
+                    "install it in the Reachy OS environment with "
+                    "`/venvs/apps_venv/bin/pip install --no-deps "
+                    "openwakeword==0.6.0`"
+                )
+            else:
+                install_hint = (
+                    "install it in the active host Conda environment; run "
+                    "`conda activate reachy_mini_env`, then "
+                    "`python -m pip install --no-deps openwakeword==0.6.0`"
+                )
             raise RuntimeError(
-                "Wake-word detection needs openWakeWord; install it in "
-                "/venvs/apps_venv with `pip install --no-deps openwakeword==0.6.0`"
+                f"Wake-word detection needs openWakeWord; {install_hint}."
             ) from exc
 
         melspectrogram_path, embedding_model_path = ensure_feature_models()
